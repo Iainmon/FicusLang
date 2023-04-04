@@ -1,11 +1,14 @@
 module Ficu where
 
-import Text.Parsec
+import Text.Parsec 
 import Text.Parsec.String (Parser)
 import Text.Parsec.Expr
 import Text.Parsec.Language
 import qualified Text.Parsec.Token as Token
 import Data.Type.Coercion (sym)
+import Data.List (intercalate)
+
+import System.IO.Unsafe (unsafePerformIO)
 
 {---------------- Grammar ----------------}
 {--
@@ -92,7 +95,7 @@ data Val
   | VStr String
   | VBool Bool
   | VNil
-  deriving (Show, Eq)
+  deriving Eq
 
 type Ident = String
 
@@ -107,7 +110,7 @@ data Expr
   | EArr Arr
   | ETuple Tuple
   | EBinOp BinOp
-  deriving (Show, Eq)
+  deriving Eq
 
 -- <obj> ::= "{" (<obj-field>("," <obj-field>)*)? "}"
 -- <obj-field> ::= <id> ":" <expr> (",")*
@@ -126,26 +129,26 @@ type BinOp = (Expr, Op, Expr)
 
 -- <fn> ::= "fn" <id>* <block> | "fn" <id>* "=>" <expr>
 data Fn = Fn [Ident] Block 
-  deriving (Show, Eq)
+  deriving Eq
 
 
 -- <fn-call> ::= <expr> "(" (<expr>("," <expr>)*)? ")"
 data FnCall = FnCall Expr [Expr]
-  deriving (Show, Eq)
+  deriving Eq
 
 
 -- <access> ::= <expr> "." <id> | <expr> "[" <expr> "]"
 data Access
   = AcDot Expr Ident
   | AcBra Expr Expr
-  deriving (Show, Eq)
+  deriving Eq
 
 
 -- <obj-match-field> ::= <id> ":" <match-pattern> (",")*
 data ObjMatchField 
   = ObjMatchFieldKey Ident 
   | ObjMatchFieldPair (Ident, MatchPattern)
-  deriving (Show, Eq)
+  deriving Eq
 
 -- <obj-pattern> ::= "{" (<obj-match-field>("," <obj-match-field>)*)? "}"
 type ObjPattern = [ObjMatchField]
@@ -163,12 +166,12 @@ data MatchPattern
   | MPObj ObjPattern
   | MPArr ArrPattern
   | MPTuple TuplePattern
-  deriving (Show, Eq)
+  deriving Eq
 
 
 -- <match-expr> ::= <match-pattern> "<-" <expr>
 data MatchExpr = MatchExpr MatchPattern Expr
-  deriving (Show, Eq)
+  deriving Eq
 
 
 -- <stmt> ::= <let-stmt> | <match-stmt> | <ret-stmt> | <if-match-stmt> | <if-stmt> | <expr> <stmt-end>
@@ -179,22 +182,22 @@ data Stmt
   | SIfMatch (IF MatchExpr)                -- <if-match-stmt> ::= "if" <match-expr> <block> ("else" <block>)?
   | SIf (IF Expr)                          -- <if-stmt> ::= "if" <expr> <block> ("else" <block>)?
   | SExpr Expr
-  deriving (Show, Eq)
+  deriving Eq
 
 
 -- <if-match-stmt>(e) ::= "if" e <block> ("else" <block>)?
 data IF e = IF e Block (Maybe Block)
-  deriving (Show, Eq)
+  deriving Eq
 
 
 -- <block> ::= "{" <stmt>* "}"
 data Block = Block [Stmt]
-  deriving (Show, Eq)
+  deriving Eq
 
 
 -- <program> ::= <stmt>*
 data Program = Program [Stmt] 
-  deriving (Show, Eq)
+  deriving Eq
 
 {---------------- Parser ----------------}
 
@@ -258,14 +261,15 @@ expr4 = do
 object :: Parser Obj
 object = do
   parserTrace "object"
-  try (do { symbol "{"; symbol "}"; return []}) <|> braces (commaSep objField)
+  try (do { symbol "{"; symbol "}"; return []}) <|> braces (commaSep (whiteSpace >> objField))
 
 -- <obj-field> ::= <id> ":" <expr> (",")*
 objField :: Parser (Ident, Expr)
 objField = do
   i <- identifier
   symbol ":"
-  e <- expr1
+  e <- try (exprNT EId identifier) <|> try (exprNT EVal value) <|> expr
+  whiteSpace
   return (i, e)
 
 exprNT :: (a -> Expr) -> Parser a -> Parser Expr
@@ -316,7 +320,7 @@ fnCall :: Parser FnCall
 fnCall = do
   parserTrace "fnCall"
   f <- exprNT EId identifier
-  args <- between (symbol "(") (symbol ")") (commaSep (try (exprNT EId identifier) <|> try (exprNT EVal value) <|> expr3))
+  args <- try (do { symbol "("; symbol ")"; return []}) <|> parens (commaSep expr) -- between (symbol "(") (symbol ")") (commaSep (try (exprNT EId identifier) <|> try (exprNT EVal value) <|> expr3))
   return (FnCall f args)
 
 -- <access> ::= <expr> "." <id> | <expr> "[" <expr> "]"
@@ -331,7 +335,7 @@ access = do
 -- data ObjMatchField 
 --   = ObjMatchFieldKey Ident 
 --   | ObjMatchFieldPair (Ident, MatchPattern)
---   deriving (Show, Eq)
+--   deriving Eq
 objMatchField :: Parser ObjMatchField
 objMatchField = do
   key <- identifier
@@ -341,15 +345,15 @@ objMatchField = do
 
 -- <obj-pattern> ::= "{" (<obj-match-field>("," <obj-match-field>)*)? "}"
 objPattern :: Parser ObjPattern
-objPattern = braces (commaSep objMatchField) <|> pure []
+objPattern = try (do { symbol "{"; symbol "}"; return []}) <|> braces (commaSep objMatchField)
 
 -- <arr-pattern> ::= "[" (<match-pattern>("," <match-pattern>)*)? "]"
 arrPattern :: Parser ArrPattern
-arrPattern = brackets (commaSep matchPattern) <|> pure []
+arrPattern = try (do { symbol "["; symbol "]"; return []}) <|> brackets (commaSep matchPattern)
 
 -- <tuple-pattern> ::= "(" (<match-pattern>("," <match-pattern>)*)? ")"
 tuplePattern :: Parser TuplePattern
-tuplePattern = parens (commaSep matchPattern) <|> pure []
+tuplePattern = try (do { symbol "("; symbol ")"; return []}) <|> parens (commaSep matchPattern)
 
 
 -- <match-pattern> ::= <id> | <val> | <obj-pattern> | <arr-pattern> | <tuple-pattern>
@@ -381,7 +385,7 @@ stmt :: Parser Stmt
 stmt = do
   parserTrace "stmt"
   stmt'
-  where stmt' = try (letStmt) <|> try (matchStmt) <|> try (retStmt) <|> try (ifMatchStmt) <|> ifStmt
+  where stmt' = try (letStmt) <|> try (matchStmt) <|> try (retStmt) <|> try ifStmt <|> try ifMatchStmt <|> exprStmt
         letStmt = do
           reserved "let"
           i <- identifier
@@ -405,30 +409,67 @@ stmt = do
           me <- matchExpr
           b <- block
           mb <- optionMaybe (reserved "else" >> block)
+          s <- getInput
+          setInput (';':s)
           return (SIfMatch (IF me b mb))
         ifStmt = do
           reserved "if"
           e <- expr
           b <- block
           mb <- optionMaybe (reserved "else" >> block)
+          s <- getInput
+          setInput (';':s)
           return (SIf (IF e b mb))
+        exprStmt = do
+          e <- fnCall <|> fail "exprStmt"
+          return (SExpr (EFnCall e))
 
+stmtSep :: Parser ()
+stmtSep = do
+  _ <- many1 (whiteSpace >> semi >> whiteSpace)
+  return ()
 stmts :: Parser [Stmt]
-stmts = stmt `endBy` semi
+stmts = do
+  whiteSpace
+  ss <- stmt `endBy` stmtSep
+  whiteSpace
+  return ss
 
 -- <block> ::= "{" <stmt>* "}"
 block :: Parser Block
-block = Block <$> braces (many stmt)
+block = Block <$> braces stmts
 
 -- <program> ::= <stmt>*
 program :: Parser Program
-program = Program <$> many stmt
+program = Program <$> stmts
 
 program' :: Parser Program
 program' = lexeme program
 
 parser :: String -> Either ParseError Program
 parser = parse program ""
+
+
+{-# INLINE source #-}
+source :: FilePath -> String
+source fn = unsafePerformIO (readFile fn)
+
+{-# INLINE run #-}
+run :: IO ()
+run = do
+  s <- readFile "prog.ficu"
+  x <- parseTest program s
+  print x
+  let res = id $! parser s
+  case res of
+    Left _  -> print ()
+    Right _ -> print ()
+  putStrLn "------------------ parser output ------------------"
+  putStrLn ""
+  case res of
+    Left err -> print err
+    Right p -> putStrLn $ pprint p
+
 
 
 
@@ -501,3 +542,89 @@ lexeme = Token.lexeme lexer
 
 
 {---------------- Pretty Printer ----------------}
+
+instance Show Val where
+  show (VNum i) = show i
+  show (VStr s) = "'" ++ s ++ "'"
+  show (VBool b) = show b
+  show VNil = "nil"
+
+instance Show Expr where
+  show (EId i) = i
+  show (EVal v) = show v
+  show (EAccess a) = show a
+  show (EFn f) = show f
+  show (EFnCall f) = show f
+  show (EObj o) = showObj o
+  show (EArr a) = showArr a
+  show (ETuple t) = showTuple t
+  show (EBinOp b) = showBinOp b
+
+showObj o = "{ " ++ intercalate ", " (map showObjField o) ++ " }"
+  where showObjField (i, e) = i ++ ": " ++ show e
+showArr a = "[" ++ intercalate "," (map show a) ++ "]"
+showTuple t = "(" ++ intercalate "," (map show t) ++ ")"
+
+showBinOp (e1, op, e2) = show e1 ++ " " ++ op ++ " " ++ show e2
+
+instance Show Fn where
+  show (Fn args block) = "fn " ++ unwords args ++ " " ++ show block
+
+instance Show FnCall where
+  show (FnCall e args) = show e ++ "(" ++ intercalate "," (map show args) ++ ")"
+
+instance Show Access where
+  show (AcDot e i) = show e ++ "." ++ i
+  show (AcBra e1 e2) = show e1 ++ "[" ++ show e2 ++ "]"
+
+
+instance Show ObjMatchField where
+  show (ObjMatchFieldKey i) = i
+  show (ObjMatchFieldPair (i, p)) = i ++ ": " ++ show p
+
+instance Show MatchPattern where
+  show (MPId i) = i
+  show (MPVal v) = show v
+  show (MPObj o) = showObjMatchPattern o
+  show (MPArr a) = showArrMatchPattern a
+  show (MPTuple t) = showTupleMatchPattern t
+
+showObjMatchPattern o = "{ " ++ intercalate ", " (map show o) ++ " }"
+showArrMatchPattern a = "[" ++ intercalate "," (map show a) ++ "]"
+showTupleMatchPattern t = "(" ++ intercalate "," (map show t) ++ ")"
+
+instance Show MatchExpr where
+  show (MatchExpr p e) = show p ++ " <- " ++ show e
+
+instance Show Stmt where
+  show (SLet i e) = "let " ++ i ++ " = " ++ show e
+  show (SMatch p e) = "let " ++ show p ++ " <- " ++ show e
+  show (SRet e) = "ret " ++ show e
+  show (SIfMatch (IF e b1 b2)) = "if " ++ show e ++ " " ++ show b1 ++ showElse b2
+  show (SIf (IF e b1 b2)) = "if " ++ show e ++ " " ++ show b1 ++ showElse b2
+  show (SExpr e) = show e
+
+showElse Nothing = ""
+showElse (Just b) = " else " ++ show b
+
+
+intercalate1 :: String -> [String] -> String
+intercalate1 _ [] = ""
+intercalate1 s [x] = x ++ s
+intercalate1 s (x:xs) = x ++ s ++ intercalate1 s xs
+
+instance Show Block where
+  show (Block stmts) = "{\n" ++ intercalate1 ";\n" (map show stmts) ++ "}"
+
+instance Show Program where
+  show (Program stmts) = intercalate1 ";\n" (map show stmts)
+
+
+pprint :: Program -> String
+pprint = format 0 . lines . show
+  where format _ [] = ""
+        format n (x:xs) | ('{':_) <- reverse x = concat (replicate n spacer) ++ x ++ "\n" ++ format (n+1) xs
+                        | ('}':_) <- x = concat (replicate (n-1) spacer) ++ x ++ "\n" ++ format (n-1) xs
+                        | otherwise = concat (replicate n spacer) ++ x ++ "\n" ++ format n xs
+        spacer = "  "
+{---------------- Interpreter ----------------}

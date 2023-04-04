@@ -1,0 +1,54 @@
+
+
+let x = 1;
+let y = 2;
+
+let z = x + y;
+
+let f = fn x y {
+    ret 1;
+};
+
+
+let add = fn x y {
+    ret x + y;
+};
+
+
+let main = fn {
+    let x = 1;
+    print(x,x + 1, 'hello', add(1,2));
+
+    -- let p = (3,4);
+    -- let (a,b) <- p;
+
+    let record = {
+        name : 'Iain',
+        age : 20,
+        list : [1,2,3],
+        address : {
+            street : '123 Main St',
+            city : 'New York',
+            state : 'NY',
+            zip : '12345'
+        }
+    };
+
+    let mul = fn a b {
+        ret a * b;
+    };
+
+    let pair = (1,'two');
+
+    let (a,b) <- pair;
+
+    if 1 {
+        print(a,b);
+    } else {
+        print('nope');
+    }
+
+};
+
+main();
+
