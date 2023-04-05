@@ -1,25 +1,43 @@
 module Ficu where
 
-import Text.Parsec hiding (parserTrace)
+import Text.Parsec
+    ( anyChar,
+      char,
+      noneOf,
+      oneOf,
+      between,
+      choice,
+      many1,
+      notFollowedBy,
+      optionMaybe,
+      optional,
+      sepEndBy,
+      (<|>),
+      getInput,
+      lookAhead,
+      many,
+      parse,
+      parseTest,
+      parserZero,
+      setInput,
+      try,
+      ParseError )
 import qualified Text.Parsec as P (parserTrace)
 import Text.Parsec.String (Parser)
 import Text.Parsec.Expr
-import Text.Parsec.Language
+import Text.Parsec.Language ( emptyDef )
 import qualified Text.Parsec.Token as Token
-import qualified Text.Parsec.Char (satisfy)
 
-import Data.Type.Coercion (sym)
 import Data.List (intercalate)
 
 import System.IO.Unsafe (unsafePerformIO)
 
 import Control.Monad.State.Class (get,put)
-import Control.Monad (void)
+import Control.Monad (void, guard)
 import Data.Monoid ((<>))
 
-fib 0 = 0
-fib 1 = 1
-fib n = fib (n-1) + fib (n-2)
+debug = True
+interactive = False
 
 {---------------- Grammar ----------------}
 {--
@@ -224,13 +242,12 @@ value = do
   return x
 
 cont s = unsafePerformIO $ do
-  s <- getLine
-  return s
+  if interactive then getLine else print () >> return ""
 
 
 parserTrace m = do
   s <- getInput
-  P.parserTrace (m ++ cont s)
+  if debug then P.parserTrace (m ++ cont s) else return ()
 
 -- <expr> ::= <id> | <val> | <access> | <fn> | <fn-call> | <obj> | <arr> | <tuple> | <bin-op> | "(" <expr> ")"
 expr :: Parser Expr
@@ -257,7 +274,7 @@ expr3 :: Parser Expr
 expr3 = do
   parserTrace "expr3"
   (try fnCall >>= return . EFnCall)
-    <|> (try fn >>= return . EFn)
+    <|> (fn >>= return . EFn)
     <|> expr4
 
 
@@ -272,8 +289,8 @@ expr4 = do
 ident :: Parser Expr
 ident = do
   parserTrace "ident"
-  i <- lexeme identifier
-  notFollowedBy (choice (map symbol ["("]))
+  i <- identifier
+  lookAhead (lexeme $ noneOf "(")
   return $ EId i
 
 -- <obj> ::= "{" (<obj-field>("," <obj-field>)*)? "}"
@@ -333,7 +350,7 @@ op = do
 fn :: Parser Fn
 fn = do
   parserTrace "fn"
-  symbol "fn"
+  reserved "fn"
   args <- many identifier <|> parserZero
   body <- block <|> (symbol "=>" *> expr >>= \e -> return (Block [SRet e]))
   return (Fn args body)
@@ -342,9 +359,20 @@ fn = do
 fnCall :: Parser FnCall
 fnCall = do
   parserTrace "fnCall"
-  f <- exprNT EId identifier
+  f <- fnIdent
+  -- args <- try (do { symbol "("; symbol ")"; return []}) 
+  --           <|> parens (commaSep (whiteSpace >> expr) )
   args <- try (do { symbol "("; symbol ")"; return []}) <|> parens (commaSep expr) -- between (symbol "(") (symbol ")") (commaSep (try (exprNT EId identifier) <|> try (exprNT EVal value) <|> expr3))
+  
   return (FnCall f args)
+
+fnIdent :: Parser Expr
+fnIdent = do
+  parserTrace "fnIdent"
+  i <- lexeme identifier
+  lookAhead (symbol "(")
+  return $ EId i
+
 
 -- <access> ::= <expr> "." <id> | <expr> "[" <expr> "]"
 access :: Parser Access
@@ -408,7 +436,7 @@ stmt :: Parser Stmt
 stmt = do
   parserTrace "stmt"
   stmt'
-  where stmt' = try (letStmt) <|> try (matchStmt) <|> try (retStmt) <|> try ifStmt <|> try ifMatchStmt <|> exprStmt <|> parserFail "stmt"
+  where stmt' = try letStmt <|> matchStmt <|> retStmt <|> ifStmt <|> ifMatchStmt <|> exprStmt -- <|> parserFail "stmt"
         letStmt = do
           reserved "let"
           i <- identifier
@@ -444,13 +472,12 @@ stmt = do
           setInput (';':s)
           return (SIf (IF e b mb))
         exprStmt = do
-          whiteSpace
           e <- fnCall  
           return (SExpr (EFnCall e))
 
 stmtSep :: Parser ()
 stmtSep = do
-  _ <- many1 (whiteSpace >> semi >> whiteSpace)
+  _ <- many (optional whiteSpace >> semi >> whiteSpace)
   return ()
 stmts :: Parser [Stmt]
 stmts = do
@@ -481,6 +508,11 @@ lexer = lexer' { Token.stringLiteral = between (char '\'') (char '\'') (many (no
 
 identifier :: Parser String
 identifier = Token.identifier lexer
+-- identifier :: Parser String
+-- identifier = do
+--   i <- Token.identifier lexer
+--   guard $ not $ i `elem` (Token.reservedNames lexer)
+--   return i
 
 integer :: Parser Int
 integer = do 
@@ -652,6 +684,7 @@ pprint = format 0 . lines . show
 
 programParser :: Parser Program
 programParser = do
+  -- if debug then cleanInput else return ()
   cleanInput
   program
 
