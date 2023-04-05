@@ -1,5 +1,5 @@
 
-
+/*
 let x = 1;
 let y = 2;
 
@@ -19,8 +19,8 @@ let main = fn {
     let x = 1;
     print(x,x + 1, 'hello', add(1,2));
 
-    -- let p = (3,4);
-    -- let (a,b) <- p;
+    // let p = (3,4);
+    // let (a,b) <- p;
 
     let record = {
         name : 'Iain',
@@ -52,3 +52,13 @@ let main = fn {
 
 main();
 
+*/
+
+
+
+
+let main = fn 8 {
+    let x = { x : 'a' };
+    
+    x();
+};

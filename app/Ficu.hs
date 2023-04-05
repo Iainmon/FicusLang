@@ -1,14 +1,25 @@
 module Ficu where
 
-import Text.Parsec 
+import Text.Parsec hiding (parserTrace)
+import qualified Text.Parsec as P (parserTrace)
 import Text.Parsec.String (Parser)
 import Text.Parsec.Expr
 import Text.Parsec.Language
 import qualified Text.Parsec.Token as Token
+import qualified Text.Parsec.Char (satisfy)
+
 import Data.Type.Coercion (sym)
 import Data.List (intercalate)
 
 import System.IO.Unsafe (unsafePerformIO)
+
+import Control.Monad.State.Class (get,put)
+import Control.Monad (void)
+import Data.Monoid ((<>))
+
+fib 0 = 0
+fib 1 = 1
+fib n = fib (n-1) + fib (n-2)
 
 {---------------- Grammar ----------------}
 {--
@@ -212,20 +223,21 @@ value = do
   x <- choice [integer >>= return . VNum, VStr <$> stringLiteral, VBool <$> bool, symbol "nil" >> return VNil]
   return x
 
+cont s = unsafePerformIO $ do
+  s <- getLine
+  return s
+
+
+parserTrace m = do
+  s <- getInput
+  P.parserTrace (m ++ cont s)
+
 -- <expr> ::= <id> | <val> | <access> | <fn> | <fn-call> | <obj> | <arr> | <tuple> | <bin-op> | "(" <expr> ")"
 expr :: Parser Expr
 -- expr :: choices [exprId , exprVal, exprAccess, exprFn, exprFnCall, exprObj, exprArr, exprTuple, exprBinOp, exprParen]
 expr = do 
   parserTrace "expr"
   
-  -- (try object >>= return . EObj)
-  -- (try array >>= return . EArr)
-    -- <|> (try tuple >>= return . ETuple)
-    -- <|> (try fnCall >>= return . EFnCall)
-    -- <|> (try identifier >>= return . EId)
-    -- <|> (try value >>= return . EVal)
-    -- <|> (try fn >>= return . EFn)
-    -- <|> expr1
   expr1
   
 expr1 :: Parser Expr
@@ -252,10 +264,17 @@ expr3 = do
 expr4 :: Parser Expr
 expr4 = do
   parserTrace "expr4"
-  try (exprNT EId identifier) 
+  try ident 
     <|> try (exprNT EVal value) 
     <|> try (parens expr)
     <|> expr
+
+ident :: Parser Expr
+ident = do
+  parserTrace "ident"
+  i <- lexeme identifier
+  notFollowedBy (choice (map symbol ["("]))
+  return $ EId i
 
 -- <obj> ::= "{" (<obj-field>("," <obj-field>)*)? "}"
 object :: Parser Obj
@@ -293,10 +312,13 @@ binOp :: Parser BinOp
 binOp = binOp'
   where binOp' = do
           parserTrace "binOp1"
+          notFollowedBy (choice (map symbol ["}", ")", "]", "fn"]))
           left <- expr2
           parserTrace "binOp2"
+          notFollowedBy (choice (map symbol ["(", "{", "["]))
           o <- op
           parserTrace "binOp3"
+          notFollowedBy (choice (map symbol [")", "}", "]"]))
           right <- expr1
           return (left, o, right)
 
@@ -310,8 +332,9 @@ op = do
 -- <fn> ::= "fn" <id>* <block> | "fn" <id>* "=>" <expr>
 fn :: Parser Fn
 fn = do
-  reserved "fn"
-  args <- many (lexeme identifier)
+  parserTrace "fn"
+  symbol "fn"
+  args <- many identifier <|> parserZero
   body <- block <|> (symbol "=>" *> expr >>= \e -> return (Block [SRet e]))
   return (Fn args body)
 
@@ -385,7 +408,7 @@ stmt :: Parser Stmt
 stmt = do
   parserTrace "stmt"
   stmt'
-  where stmt' = try (letStmt) <|> try (matchStmt) <|> try (retStmt) <|> try ifStmt <|> try ifMatchStmt <|> exprStmt
+  where stmt' = try (letStmt) <|> try (matchStmt) <|> try (retStmt) <|> try ifStmt <|> try ifMatchStmt <|> exprStmt <|> parserFail "stmt"
         letStmt = do
           reserved "let"
           i <- identifier
@@ -421,7 +444,8 @@ stmt = do
           setInput (';':s)
           return (SIf (IF e b mb))
         exprStmt = do
-          e <- fnCall <|> fail "exprStmt"
+          whiteSpace
+          e <- fnCall  
           return (SExpr (EFnCall e))
 
 stmtSep :: Parser ()
@@ -431,7 +455,7 @@ stmtSep = do
 stmts :: Parser [Stmt]
 stmts = do
   whiteSpace
-  ss <- stmt `endBy` stmtSep
+  ss <- stmt `sepEndBy` stmtSep
   whiteSpace
   return ss
 
@@ -443,36 +467,6 @@ block = Block <$> braces stmts
 program :: Parser Program
 program = Program <$> stmts
 
-program' :: Parser Program
-program' = lexeme program
-
-parser :: String -> Either ParseError Program
-parser = parse program ""
-
-
-{-# INLINE source #-}
-source :: FilePath -> String
-source fn = unsafePerformIO (readFile fn)
-
-{-# INLINE run #-}
-run :: IO ()
-run = do
-  s <- readFile "prog.ficu"
-  x <- parseTest program s
-  print x
-  let res = id $! parser s
-  case res of
-    Left _  -> print ()
-    Right _ -> print ()
-  putStrLn "------------------ parser output ------------------"
-  putStrLn ""
-  case res of
-    Left err -> print err
-    Right p -> putStrLn $ pprint p
-
-
-
-
 -- {---------------- Lexer ----------------}
 
 lexer :: Token.TokenParser ()
@@ -480,7 +474,9 @@ lexer = lexer' { Token.stringLiteral = between (char '\'') (char '\'') (many (no
   where lexer' = Token.makeTokenParser (emptyDef
                   { Token.reservedNames = ["true", "false", "nil", "fn", "let", "ret", "if", "else"]
                   , Token.reservedOpNames = ["+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">=", "and", "or", ".", "=>", "<-", "="]
-                  , Token.commentLine = "--"
+                  , Token.commentLine = "//"
+                  , Token.commentStart = "/*"
+                  , Token.commentEnd = "*/"
                   }) 
 
 identifier :: Parser String
@@ -540,6 +536,20 @@ semi = Token.semi lexer >> return ()
 lexeme :: Parser a -> Parser a
 lexeme = Token.lexeme lexer
 
+-- trim :: Parser a -> Parser a
+-- trim p = do
+--   whiteSpace
+--   x <- p
+--   whiteSpace
+--   return x
+
+white :: Parser Char
+white = oneOf " \t\r"
+
+cleanInput :: Parser ()
+cleanInput = do
+  s <- many ( (many1 white >> return ' ') <|> white <|> anyChar)
+  setInput s
 
 {---------------- Pretty Printer ----------------}
 
@@ -627,4 +637,46 @@ pprint = format 0 . lines . show
                         | ('}':_) <- x = concat (replicate (n-1) spacer) ++ x ++ "\n" ++ format (n-1) xs
                         | otherwise = concat (replicate n spacer) ++ x ++ "\n" ++ format n xs
         spacer = "  "
+
+
 {---------------- Interpreter ----------------}
+
+
+
+
+{---------------- Evaluator ----------------}
+
+-- data ParsecT s u m a
+-- type Parsec s u = ParsecT s u Identity
+-- type Parser a = Parsec String () = ParsecT String () Identity a
+
+programParser :: Parser Program
+programParser = do
+  cleanInput
+  program
+
+parser :: String -> Either ParseError Program
+parser = parse programParser ""
+
+
+{-# INLINE source #-}
+source :: FilePath -> String
+source fn = unsafePerformIO (readFile fn)
+
+{-# INLINE run #-}
+run :: IO ()
+run = do
+  s <- readFile "prog.ficu"
+  x <- parseTest programParser s
+  print x
+  let res = id $! parser s
+  case res of
+    Left _  -> print ()
+    Right _ -> print ()
+  putStrLn "------------------ parser output ------------------"
+  putStrLn ""
+  case res of
+    Left err -> print err
+    Right p -> putStrLn $ pprint p
+
+
