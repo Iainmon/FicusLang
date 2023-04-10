@@ -21,7 +21,7 @@ import Text.Parsec
       parserZero,
       setInput,
       try,
-      ParseError )
+      ParseError, Parsec )
 import qualified Text.Parsec as P (parserTrace)
 import Text.Parsec.String (Parser)
 import Text.Parsec.Expr
@@ -35,6 +35,14 @@ import System.IO.Unsafe (unsafePerformIO)
 import Control.Monad.State.Class (get,put)
 import Control.Monad (void, guard)
 import Data.Monoid ((<>))
+
+-- import Control.Monad.Trans.Class
+-- import Control.Monad.Trans.State 
+-- import Control.Monad.State 
+import Control.Monad.State.Strict
+
+
+
 
 debug = True
 interactive = False
@@ -227,6 +235,279 @@ data Block = Block [Stmt]
 -- <program> ::= <stmt>*
 data Program = Program [Stmt] 
   deriving Eq
+
+
+
+
+
+
+
+
+{---------------- Interpreter ----------------}
+
+
+data SemV
+  = SVal Val
+  | SObj SObj
+  | SArr [SemV]
+  | STup [SemV]
+  | SFn SemClosure
+
+data SemClosure = Clo [Ident] Block Scope
+
+data SObj = O [(String, SemV)]
+
+type Frame = [(String, SemV)]
+
+data Scope = Scope { unScope :: [Frame] }
+
+
+instance Show SemV where
+  show (SVal v) = show v
+  show (SObj o) = show o
+  show (SArr a) = show a
+  show (STup t) = show t
+  show (SFn c)  = show c
+
+instance Show SemClosure where
+  show (Clo i b s) = "(closure " ++ intercalate " " i ++ " | " ++ show b ++ ")"
+
+instance Show SObj where
+  show (O o) = "{" ++ (intercalate ", " (map (\(k,v) -> k ++ ": " ++ show v) o)) ++ "}"
+
+instance Show Scope where
+  show (Scope s) = intercalate "\n" $ map show [[(k,show v) | (k,v) <- f] | f <- s]
+
+
+scopeGet :: String -> Scope -> SemV
+scopeGet _ (Scope []) = SVal VNil
+scopeGet i (Scope (s:ss)) = case lookup i s of
+  Just v  -> v
+  Nothing -> scopeGet i (Scope ss)
+
+scopePut :: String -> SemV -> Scope -> Scope
+scopePut i v (Scope []) = Scope [[(i,v)]]
+scopePut i v (Scope (s:ss)) = Scope (((i,v):s):ss)
+
+
+-- type Machine a = State Scope a
+
+
+type Machine a = State Scope a
+
+assign :: String -> SemV -> Machine ()
+assign i v = modify (scopePut i v)
+
+reference :: String -> Machine SemV
+reference i = gets (scopeGet i)
+
+pushFrame :: Frame -> Machine ()
+pushFrame f = modify (Scope . (f:) . unScope)
+
+popFrame :: Machine Frame
+popFrame = do
+  Scope s <- get
+  case s of
+    (f:fs) -> do
+      modify (const (Scope fs))
+      return f
+    [] -> error "popFrame: empty scope"
+
+{-# INLINE gaslight #-}
+gaslight :: Monad m => IO a -> m a
+gaslight x = return (unsafePerformIO x)
+
+
+semProgram :: Program -> Machine (IO ())
+semProgram (Program ss) = do
+  as <- mapM semStmt ss
+  return (msum as)
+
+semStmt :: Stmt -> Machine (IO ())
+semStmt stm = do
+  case stm of
+    SLet i e -> semExpr e >>= assign i >> return (return ())
+    SMatch p e -> semMatchStmt p e >> return (return ())
+    SRet e -> do
+      v <- semExpr e
+      assign "ret" v
+      return (return ())
+    SExpr (EFnCall fc) -> do
+      v <- semFnCall fc
+      let x = unsafePerformIO (v >>= print)
+      return (v >>= print)
+      -- gaslight (return x >>= print)
+
+    _ -> error "semStmt: not implemented"
+    -- SExpr (EFnCall (FnCall (EId "print") [e])) -> do
+    --   v <- semExpr e
+    --   gaslight (print v)
+  -- return (return ())
+--     SIfMatch (IF e b1 b2) -> do
+--       v <- semExpr e
+--       case match (MPVal v) v of
+--         Just s -> do
+--           modify (Scope . (s:) . unScope)
+--           semBlock b1
+--         Nothing -> semBlock b2
+--     SIf (IF e b1 b2) -> do
+--       v <- semExpr e
+--       case v of
+--         SBool True -> semBlock b1
+--         SBool False -> semBlock b2
+--         _ -> error "if condition must be a boolean"
+--     SExpr e -> semExpr e >> return SNil
+
+
+-- semMatchStmt :: MatchPattern -> Expr -> Machine (IO ())
+semMatchStmt :: MatchPattern -> Expr -> Machine ()
+semMatchStmt p e = do
+  v <- semExpr e
+  case match p v of 
+    Just s -> do
+      pushFrame s
+      return ()
+    Nothing -> error "match failed" --return (print "match failed")
+  
+semExpr :: Expr -> Machine SemV
+semExpr (EVal v) = return (SVal v)
+semExpr (EId i) = reference i
+semExpr (EFnCall fc) = do
+  v <- semFnCall fc
+  let v' = unsafePerformIO v
+  return v'
+semExpr (EObj o) = do
+  o' <- mapM (\(k,e) -> do
+    v <- semExpr e
+    return (k,v)) o
+  return (SObj (O o'))
+semExpr (EArr es) = do
+  vs <- mapM semExpr es
+  return (SArr vs)
+semExpr (ETuple es) = do
+  vs <- mapM semExpr es
+  return (STup vs)
+semExpr (EFn (Fn xs b)) = do
+  Scope s <- get
+  return (SFn (Clo xs b (Scope s)))
+semExpr e = error $ "semExpr: not implemented" ++ show e
+
+semFnCall :: FnCall -> Machine (IO SemV)
+
+-- semFnCall (FnCall (EId i) es) | i `elem` ["hello"] = error "cool"
+semFnCall (FnCall (EId i) es) | i `elem` ["print"] = do
+    (a,bs) <- res
+    return (a >> mapM_ print bs >> return (SVal VNil))
+  where res = do
+          vs <- mapM semExpr es
+          let x = do { print vs; return (SVal VNil) }
+          return (x,vs)
+    -- let x = unsafePerformIO (print vs >> return (SVal VNil))
+    -- return (print (x,vs) >> return (SVal VNil))
+semFnCall (FnCall e es) = do
+  v <- semExpr e
+  let SFn (Clo xs b (Scope s')) = (error $ show v)
+  vs <- mapM semExpr es
+  let frame = zip xs vs
+  Scope s <- get
+  put $ Scope s'
+  pushFrame frame
+  retV <- semBlock b
+  popFrame
+  put $ Scope s
+  return retV
+
+semBlock :: Block -> Machine (IO SemV)
+semBlock (Block ss) = do
+  pushFrame []
+  as <- mapM semStmt ss
+  retV <- reference "_ret"
+  popFrame
+  let io = sequence_ as >> return retV
+  let x = unsafePerformIO io
+  return (sequence_ as >> print x >> return retV)
+
+match :: MatchPattern -> SemV -> Maybe Frame
+match (MPId i) v = Just [(i,v)]
+match (MPVal v1) (SVal v2) = if v1 == v2 then Just [] else Nothing
+match (MPObj o) (SObj (O o')) = matchObj o o'
+-- match (MPArr a) (SArr a') = matchArr a a'
+-- match (MPTuple t) (STup t') = matchTup t t'
+match _ _ = Nothing
+
+
+matchObj :: [ObjMatchField] -> [(String, SemV)] -> Maybe Frame
+matchObj [] [] = Just []
+matchObj [] _ = Nothing
+matchObj _ [] = Nothing
+matchObj (ObjMatchFieldKey i:os) ((i',v):os') | i == i' = fmap ([(i,v)]++) $ matchObj os os'
+                                              | otherwise = (++) <$> matchObj (ObjMatchFieldKey i:os) os' <*> matchObj os ((i',v):os')
+matchObj (ObjMatchFieldPair (i,p):os) ((i',v):os') 
+  | i == i' = case match p v of
+    Just s -> fmap (s++) $ matchObj os os'
+    Nothing -> (++) <$> matchObj (ObjMatchFieldPair (i,p):os) os' <*> matchObj os ((i',v):os')
+matchObj _ _ = Nothing
+
+
+
+
+
+
+
+
+{---------------- Evaluator ----------------}
+
+-- data ParsecT s u m a
+-- type Parsec s u = ParsecT s u Identity
+-- type Parser a = Parsec String () = ParsecT String () Identity a
+
+programParser :: Parser Program
+programParser = do
+  -- if debug then cleanInput else return ()
+  cleanInput
+  program
+
+parser :: String -> Either ParseError Program
+parser = parse programParser ""
+
+
+{-# INLINE source #-}
+source :: FilePath -> String
+source fn = unsafePerformIO (readFile fn)
+
+{-# INLINE run #-}
+run :: IO ()
+run = do
+  s <- readFile "prog.ficu"
+  x <- parseTest programParser s
+  print x
+  let res = id $! parser s
+  case res of
+    Left _  -> print ()
+    Right _ -> print ()
+  putStrLn "------------------ parser output ------------------"
+  putStrLn ""
+  case res of
+    Left err -> print err
+    Right p -> do
+      putStrLn $ pprint p
+      putStrLn "------------------ interpreter output ------------------"
+      putStrLn ""
+      let (vs,s) = runState (semProgram p) (Scope [[]])
+      print s
+      vs >> print ()
+
+
+
+
+
+
+
+
+
+
+
+
 
 {---------------- Parser ----------------}
 
@@ -671,45 +952,5 @@ pprint = format 0 . lines . show
         spacer = "  "
 
 
-{---------------- Interpreter ----------------}
 
-
-
-
-{---------------- Evaluator ----------------}
-
--- data ParsecT s u m a
--- type Parsec s u = ParsecT s u Identity
--- type Parser a = Parsec String () = ParsecT String () Identity a
-
-programParser :: Parser Program
-programParser = do
-  -- if debug then cleanInput else return ()
-  cleanInput
-  program
-
-parser :: String -> Either ParseError Program
-parser = parse programParser ""
-
-
-{-# INLINE source #-}
-source :: FilePath -> String
-source fn = unsafePerformIO (readFile fn)
-
-{-# INLINE run #-}
-run :: IO ()
-run = do
-  s <- readFile "prog.ficu"
-  x <- parseTest programParser s
-  print x
-  let res = id $! parser s
-  case res of
-    Left _  -> print ()
-    Right _ -> print ()
-  putStrLn "------------------ parser output ------------------"
-  putStrLn ""
-  case res of
-    Left err -> print err
-    Right p -> putStrLn $ pprint p
-
-
+  
