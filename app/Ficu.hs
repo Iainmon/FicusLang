@@ -36,10 +36,12 @@ import Control.Monad.State.Class (get,put)
 import Control.Monad (void, guard)
 import Data.Monoid ((<>))
 
+import Prelude hiding (readIO)
+
 -- import Control.Monad.Trans.Class
 -- import Control.Monad.Trans.State 
 -- import Control.Monad.State 
-import Control.Monad.State.Strict
+import Control.Monad.State
 
 
 
@@ -266,7 +268,7 @@ instance Show SemV where
   show (SVal v) = show v
   show (SObj o) = show o
   show (SArr a) = show a
-  show (STup t) = show t
+  show (STup t) = "(" ++ intercalate ", " (map show t) ++ ")"
   show (SFn c)  = show c
 
 instance Show SemClosure where
@@ -290,6 +292,176 @@ scopePut i v (Scope []) = Scope [[(i,v)]]
 scopePut i v (Scope (s:ss)) = Scope (((i,v):s):ss)
 
 
+
+type Machine m a = StateT Scope m a
+
+assign :: Monad m => String -> SemV -> Machine m ()
+assign i v = modify (scopePut i v)
+
+reference :: Monad m => String -> Machine m SemV
+reference i = gets (scopeGet i)
+
+pushFrame :: Monad m => Frame -> Machine m ()
+pushFrame f = modify (Scope . (f:) . unScope)
+
+popFrame :: Monad m => Machine m Frame
+popFrame = do
+  Scope s <- get
+  case s of
+    (f:fs) -> do
+      modify (const (Scope fs))
+      return f
+    [] -> error "popFrame: empty scope"
+
+class Monad m => RunEnv m where
+  readInput :: m String
+  writeOutput :: String -> m ()
+
+readIO :: RunEnv m => Machine m String
+readIO = lift readInput
+
+writeIO :: RunEnv m => String -> Machine m ()
+writeIO = lift . writeOutput
+
+instance RunEnv IO where
+  readInput = getLine
+  writeOutput = putStrLn
+
+semProgram :: RunEnv m => Program -> Machine m ()
+semProgram (Program ss) = mapM_ semStmt ss
+
+
+semStmt :: RunEnv m => Stmt -> Machine m ()
+semStmt (SLet i e) = semExpr e >>= assign i  
+semStmt (SExpr e) = semExpr e >> return ()
+semStmt (SMatch p e) = semMatchStmt p e
+semStmt (SRet e) = do 
+  v <- semExpr e
+  assign "_ret" v
+semStmt (SIfMatch (IF e b1 b2)) = semIfMatchStmt e b1 b2
+
+semExpr :: RunEnv m => Expr -> Machine m SemV
+semExpr (EVal v) = return (SVal v)
+semExpr (EId i) = reference i
+semExpr (EFnCall fnc) = semFnCall fnc
+semExpr (EObj o) = do
+  o' <- mapM (\(k,e) -> do
+    v <- semExpr e
+    return (k,v)) o
+  return (SObj (O o'))
+semExpr (EArr es) = do
+  vs <- mapM semExpr es
+  return (SArr vs)
+semExpr (ETuple es) = do
+  vs <- mapM semExpr es
+  return (STup vs)
+semExpr (EFn (Fn xs b)) = do
+  Scope s <- get
+  return (SFn (Clo xs b (Scope s)))
+semExpr (EBinOp (e1,op,e2)) = do
+  v1 <- semExpr e1
+  v2 <- semExpr e2
+  case (v1,v2) of
+    (SVal v1', SVal v2') -> return (SVal (evalOp op v1' v2'))
+    _ -> error $ "semExpr: invalid binop " ++ show op ++ " " ++ show v1 ++ " " ++ show v2
+semExpr e = error $ "semExpr: not implemented" ++ show e
+
+evalOp :: Op -> Val -> Val -> Val
+evalOp "+" (VNum i1) (VNum i2) = VNum (i1 + i2)
+evalOp "-" (VNum i1) (VNum i2) = VNum (i1 - i2)
+evalOp "*" (VNum i1) (VNum i2) = VNum (i1 * i2)
+evalOp "/" (VNum i1) (VNum i2) = VNum (i1 `div` i2)
+
+
+
+semFnCall :: RunEnv m => FnCall -> Machine m SemV
+semFnCall (FnCall (EId "print") es) = do
+  vs <- mapM semExpr es
+  let ppShow v  = case v of { SVal (VStr s) -> s; _ -> show v }
+  let s = intercalate " " (map ppShow vs)
+  writeIO s
+  return (SVal VNil)
+semFnCall (FnCall (EId "input") []) = do
+  v <- readIO
+  return (SVal (VStr v))
+semFnCall (FnCall e es) = do
+  v <- semExpr e
+  let SFn (Clo xs b (Scope s')) = v
+  vs <- mapM semExpr es
+  let frame = zip xs vs
+  Scope s <- get
+  put $ Scope s'
+  pushFrame frame
+  retV <- semBlock b
+  popFrame
+  put $ Scope s
+  return retV
+
+
+semBlock :: RunEnv m => Block -> Machine m SemV
+semBlock (Block ss) = do
+  pushFrame []
+  assign "_ret" (SVal VNil)
+  mapM semStmt ss
+  retV <- reference "_ret"
+  popFrame
+  return retV
+
+semIfMatchStmt :: RunEnv m => MatchExpr -> Block -> Maybe Block -> Machine m ()
+semIfMatchStmt (MatchExpr p e) b1 b2 = do
+  v <- semExpr e
+  case match p v of 
+    Just s -> do
+      pushFrame s
+      semBlock b1
+      popFrame
+      return ()
+    Nothing -> case b2 of
+      Just b2' -> do
+        semBlock b2'
+        return ()
+      Nothing -> return ()
+
+semMatchStmt :: RunEnv m => MatchPattern -> Expr -> Machine m ()
+semMatchStmt p e = do
+  v <- semExpr e
+  case match p v of 
+    Just s -> do
+      pushFrame s
+      return ()
+    Nothing -> error "match failed" --return (print "match failed")
+
+match :: MatchPattern -> SemV -> Maybe Frame
+match (MPId i) v = Just [(i,v)]
+match (MPVal v1) (SVal v2) = if v1 == v2 then Just [] else Nothing
+match (MPObj o) (SObj (O o')) = matchObj o o'
+-- match (MPArr a) (SArr a') = matchArr a a'
+match (MPTuple t) (STup t') = matchTup (MPTuple t) t'
+match _ _ = Nothing
+
+matchTup :: MatchPattern -> [SemV] -> Maybe Frame
+matchTup (MPTuple []) [] = Just []
+matchTup (MPTuple (p:ps)) (v:vs) = do
+  s <- match p v
+  s' <- matchTup (MPTuple ps) vs
+  return (s ++ s')
+matchTup _ _ = Nothing
+
+
+matchObj :: [ObjMatchField] -> [(String, SemV)] -> Maybe Frame
+matchObj [] [] = Just []
+matchObj [] _ = Nothing
+matchObj _ [] = Nothing
+matchObj (ObjMatchFieldKey i:os) ((i',v):os') | i == i' = fmap ([(i,v)]++) $ matchObj os os'
+                                              | otherwise = (++) <$> matchObj (ObjMatchFieldKey i:os) os' <*> matchObj os ((i',v):os')
+matchObj (ObjMatchFieldPair (i,p):os) ((i',v):os') 
+  | i == i' = case match p v of
+    Just s -> fmap (s++) $ matchObj os os'
+    Nothing -> (++) <$> matchObj (ObjMatchFieldPair (i,p):os) os' <*> matchObj os ((i',v):os')
+matchObj _ _ = Nothing
+
+
+{--
 -- type Machine a = State Scope a
 
 
@@ -449,7 +621,7 @@ matchObj (ObjMatchFieldPair (i,p):os) ((i',v):os')
 matchObj _ _ = Nothing
 
 
-
+--}
 
 
 
@@ -493,9 +665,8 @@ run = do
       putStrLn $ pprint p
       putStrLn "------------------ interpreter output ------------------"
       putStrLn ""
-      let (vs,s) = runState (semProgram p) (Scope [[]])
-      print s
-      vs >> print ()
+      runStateT (semProgram p) (Scope [[]])
+      return ()
 
 
 
@@ -690,7 +861,7 @@ tuplePattern = try (do { symbol "("; symbol ")"; return []}) <|> parens (commaSe
 
 -- <match-pattern> ::= <id> | <val> | <obj-pattern> | <arr-pattern> | <tuple-pattern>
 matchPattern :: Parser MatchPattern
-matchPattern = choices
+matchPattern = choice
   [ MPId <$> identifier
   , MPVal <$> value
   , MPObj <$> objPattern
@@ -717,7 +888,7 @@ stmt :: Parser Stmt
 stmt = do
   parserTrace "stmt"
   stmt'
-  where stmt' = try letStmt <|> matchStmt <|> retStmt <|> ifStmt <|> ifMatchStmt <|> exprStmt -- <|> parserFail "stmt"
+  where stmt' = try letStmt <|> matchStmt <|> retStmt <|> ifMatchStmt <|> ifStmt <|> exprStmt -- <|> parserFail "stmt"
         letStmt = do
           reserved "let"
           i <- identifier

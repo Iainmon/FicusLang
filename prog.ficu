@@ -1,4 +1,4 @@
-/*
+
 let x = 1;
 let y = 2;
 
@@ -40,22 +40,42 @@ let main = fn {
     let pair = (1,'two');
 
     let (a,b) <- pair;
+    print(a,b);
 
-    if 1 {
-        print(a,b);
+    if (1,d) <- pair {
+        print(d);
     } else {
-        print('nope');
-    }
+        print('Does not match');
+    };
+
+    // if  {
+    //     print(a,b);
+    // } else {
+    //     print('nope');
+    // }
 
 };
 
 main();
 
-*/
 
 print('hello world');
 
-print('ello  world');
+let xs = { a: 'Iain', b: 2 };
+print(xs);
 
+
+let greeting = fn name {
+    print('Hello,', name);
+};
+
+greeting('Iain');
+
+
+print('What is your name?');
+
+let msg = input();
+
+greeting(msg);
 
 
