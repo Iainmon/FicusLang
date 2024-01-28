@@ -79,3 +79,15 @@ let msg = input();
 greeting(msg);
 
 
+let f = fn x {
+    let y = 2;
+    ret y * x;
+}
+
+let g = fn ff {
+    let y = 3;
+    ret ff(3);
+}
+
+print(g(f));
+
